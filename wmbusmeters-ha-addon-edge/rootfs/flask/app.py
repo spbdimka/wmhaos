@@ -1,5 +1,5 @@
-import json, requests, os, re, base64, zipfile, xmltodict, subprocess
-from flask import Flask, jsonify, render_template, request, redirect, url_for
+import json, requests, os, re, base64, zipfile, xmltodict
+from flask import Flask, jsonify, render_template, request
 from waitress import serve
 from threading import Thread
 from xml.dom import minidom
@@ -10,7 +10,8 @@ from cryptography.hazmat.backends import default_backend
 app = Flask(__name__, static_url_path='')
 
 cfgfile = '/data/options_custom.json'
-DRIVER_DIRECTORY = '/data/drivers'
+RESTART_URL = "http://supervisor/addons/self/restart"
+URL_HEADER = { "Authorization": "Bearer " + os.environ.get('SUPERVISOR_TOKEN'), "content-type": "application/json" }
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -37,11 +38,7 @@ def save_json_to_file():
     return jsonify({'message': 'Config saved and addon restarted successfully.'})
 
 def restart_call():
-    try:
-        subprocess.run(['s6-svc', '-r', '/run/service/wmbusmeters'], check=True)
-        print("wmbusmeters service restarted successfully.")
-    except subprocess.CalledProcessError as e:
-        print(f"Failed to restart wmbusmeters service: {e}")
+    requests.post(RESTART_URL, headers=URL_HEADER)
 
 @app.route('/get_json')
 def get_json():
@@ -109,74 +106,6 @@ def decrypt():
         return jsonify({'OK': {'id': meterid, 'key': meterkey}})	
     else:
         return jsonify({'ERROR': 'Unable to extract details from file'})
-        
-@app.route('/drivers')
-def drivers():
-    try:
-        files = os.listdir(DRIVER_DIRECTORY)
-        return render_template('drivers.html', files=files)
-    except Exception as e:
-        print(f"Error listing drivers: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/add_driver', methods=['GET', 'POST'])
-def add_driver():
-    if request.method == 'POST':
-        filename = request.form['filename']
-        content = request.form['content']
-        filepath = os.path.join(DRIVER_DIRECTORY, filename)
-        try:
-            with open(filepath, 'w') as f:
-                f.write(content)
-            Thread(target=restart_call, args=()).start()
-            return jsonify({'status': 'success', 'redirect_url': url_for('drivers')})
-        except Exception as e:
-            print(f"Error adding driver {filename}: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    return render_template('add_driver.html', filename='', content='')
-
-@app.route('/edit_driver/<filename>', methods=['GET', 'POST'])
-def edit_driver(filename):
-    filepath = os.path.join(DRIVER_DIRECTORY, filename)
-    if request.method == 'POST':
-        content = request.form['content']
-        try:
-            with open(filepath, 'w') as f:
-                f.write(content)
-            Thread(target=restart_call, args=()).start()
-            return jsonify({'status': 'success', 'redirect_url': url_for('drivers')})
-        except Exception as e:
-            print(f"Error editing driver {filename}: {e}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
-    try:
-        with open(filepath, 'r') as f:
-            content = f.read()
-    except FileNotFoundError:
-        abort(404)
-    return render_template('edit_driver.html', filename=filename, content=content)
-
-@app.route('/delete_driver/<filename>', methods=['POST'])
-def delete_driver(filename):
-    filepath = os.path.join(DRIVER_DIRECTORY, filename)
-    try:
-        if os.path.exists(filepath):
-            os.remove(filepath)
-        Thread(target=restart_call, args=()).start()
-        return jsonify({'status': 'success', 'redirect_url': url_for('drivers')})
-    except Exception as e:
-        print(f"Error deleting driver {filename}: {e}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/check_filename', methods=['POST'])
-def check_filename():
-    data = request.json
-    filename = data.get('filename')
-    if not filename:
-        return jsonify({'error': 'No filename provided'}), 400
-    file_path = os.path.join(DRIVER_DIRECTORY, filename)
-    if os.path.exists(file_path):
-        return jsonify({'exists': True})
-    return jsonify({'exists': False})
 
 if __name__ == '__main__':
     serve(app, host="127.0.0.1", port=5000)

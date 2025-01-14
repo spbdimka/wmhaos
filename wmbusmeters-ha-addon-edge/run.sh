@@ -32,17 +32,6 @@ fi
 if ! bashio::fs.directory_exists "${CONFIG_DATA_PATH}/etc/wmbusmeters.d"; then
     mkdir -p "${CONFIG_DATA_PATH}/etc/wmbusmeters.d"
 fi
-if ! bashio::fs.directory_exists "${CONFIG_DATA_PATH}/etc/wmbusmeters.drivers.d"; then
-    mkdir -p "${CONFIG_DATA_PATH}/etc/wmbusmeters.drivers.d"
-fi
-if [ ! -d /data/drivers ]
-then
-    mkdir -p /data/drivers
-fi
-rm -rf ${CONFIG_DATA_PATH}/etc/wmbusmeters.drivers.d/*
-if [ -n "$(ls -A /data/drivers 2>/dev/null)" ]; then
-    cp /data/drivers/* "${CONFIG_DATA_PATH}/etc/wmbusmeters.drivers.d/"
-fi
 
 echo -e "$CONFIG_CONF" | jq -r 'to_entries|map("\(.key)=\(.value|tostring)")|.[]' > $CONFIG_DATA_PATH/etc/wmbusmeters.conf
 
@@ -77,7 +66,7 @@ do
     meter_no=$(( meter_no+1 ))
     METER_NAME=$(printf 'meter-%04d' "$(( meter_no ))")
     bashio::log.info "Adding $METER_NAME ..."
-    METER_DATA=$(printf '%s\n' $meter | jq --raw-output -c -M '.')
+    METER_DATA=$(printf '%s\n' $meter | jq --raw-output -c -M '.') 
     echo -e "$METER_DATA" | jq -r 'to_entries|map("\(.key)=\(.value|tostring)")|.[]' > $CONFIG_DATA_PATH/etc/wmbusmeters.d/$METER_NAME
 done
 
@@ -89,43 +78,32 @@ then
   if bashio::jq.exists "${CONFIG_PATH}" ".mqtt.username"; then MQTT_USER=$(bashio::jq "${CONFIG_PATH}" ".mqtt.username"); fi
   if bashio::jq.exists "${CONFIG_PATH}" ".mqtt.password"; then MQTT_PASSWORD=$(bashio::jq "${CONFIG_PATH}" ".mqtt.password"); fi
 else
-  if ! bashio::services.available "mqtt"; then
-    bashio::log.warning "No internal MQTT service found or configured"
-    MQTT_HOST="none"
-  else
-    bashio::log.info "MQTT service found, fetching credentials ..."
-    MQTT_HOST=$(bashio::services mqtt "host")
-    MQTT_PORT=$(bashio::services mqtt "port")
-    MQTT_USER=$(bashio::services mqtt "username")
-    MQTT_PASSWORD=$(bashio::services mqtt "password")
-  fi
+  MQTT_HOST=$(bashio::services mqtt "host")
+  MQTT_PORT=$(bashio::services mqtt "port")
+  MQTT_USER=$(bashio::services mqtt "username")
+  MQTT_PASSWORD=$(bashio::services mqtt "password")
 fi
 
-touch /wmbusmeters/mosquitto_pub.sh
+bashio::log.info "Broker $MQTT_HOST will be used."
+pub_args=('-h' $MQTT_HOST )
+pub_args_quoted=('-h' \'$MQTT_HOST\' )
+[[ ! -z ${MQTT_PORT+x} ]] && pub_args+=( '-p' $MQTT_PORT ) && pub_args_quoted+=( '-p' \'$MQTT_PORT\' )
+[[ ! -z ${MQTT_USER+x} ]] && pub_args+=( '-u' $MQTT_USER ) && pub_args_quoted+=( '-u' \'$MQTT_USER\' )
+[[ ! -z ${MQTT_PASSWORD+x} ]] && pub_args+=( '-P' $MQTT_PASSWORD ) && pub_args_quoted+=( '-P' \'$MQTT_PASSWORD\' )
 
-if [[ "$MQTT_HOST" != "none" ]]; then
-    bashio::log.info "Broker $MQTT_HOST will be used."
-    pub_args=('-h' "$MQTT_HOST")
-    pub_args_quoted=('-h' "'$MQTT_HOST'")
-    [[ ! -z ${MQTT_PORT+x} ]] && pub_args+=( '-p' $MQTT_PORT ) && pub_args_quoted+=( '-p' \'$MQTT_PORT\' )
-    [[ ! -z ${MQTT_USER+x} ]] && pub_args+=( '-u' $MQTT_USER ) && pub_args_quoted+=( '-u' \'$MQTT_USER\' )
-    [[ ! -z ${MQTT_PASSWORD+x} ]] && pub_args+=( '-P' $MQTT_PASSWORD ) && pub_args_quoted+=( '-P' \'$MQTT_PASSWORD\' )
-
-    cat > /wmbusmeters/mosquitto_pub.sh << EOL
+cat > /wmbusmeters/mosquitto_pub.sh << EOL
 #!/usr/bin/with-contenv bashio
 TOPIC=\$1
 MESSAGE=\$2
 /usr/bin/mosquitto_pub ${pub_args_quoted[@]} -r -t "\$TOPIC" -m "\$MESSAGE"
 EOL
-
-    # Running MQTT discovery
-    /mqtt_discovery.sh ${pub_args[@]} -c $CONFIG_PATH -w $CONFIG_DATA_PATH || true
-fi
-
 chmod a+x /wmbusmeters/mosquitto_pub.sh
 
+# Running MQTT discovery
+/mqtt_discovery.sh ${pub_args[@]} -c $CONFIG_PATH -w $CONFIG_DATA_PATH || true
+
+bashio::log.info "Starting web configuration service."
+python3 /flask/app.py &
+
 bashio::log.info "Running wmbusmeters ..."
-if pgrep wmbusmeters > /dev/null; then
-    pkill wmbusmeters
-fi
-/wmbusmeters/wmbusmeters --useconfig=$CONFIG_DATA_PATH 
+/wmbusmeters/wmbusmeters --useconfig=$CONFIG_DATA_PATH
